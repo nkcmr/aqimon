@@ -353,6 +353,7 @@ func checkAirQuality(ctx context.Context, cfg config, s *state, rc *retryablehtt
 		event = "air_quality_bad"
 	} else {
 		log.Printf("nothing to alert about")
+		return nil
 	}
 
 	return errors.Wrap(n.notify(ctx, event, aqiReadings{
