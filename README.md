@@ -1,6 +1,6 @@
 # aqimon
 
-a simple daemon that pulls [PurpleAir](https://www2.purpleair.com) sensor data and watches if AQI crosses a threshold, then sends [IFTTT](https://ifttt.com) webhooks about it. i use the webhooks to trigger iOS notifications that tell me when I can open/close my windows to let fresh air in.
+a simple daemon that pulls [PurpleAir](https://www2.purpleair.com) sensor data and watches if AQI crosses a threshold, then sends [IFTTT](https://ifttt.com) or Twilio SMS webhooks about it. i use the webhooks to trigger iOS notifications that tell me when I can open/close my windows to let fresh air in.
 
 ## installation
 
@@ -37,8 +37,6 @@ WantedBy=multi-user.target
 
 [0]: https://deadmanssnitch.com
 
-
-
 ## license
 
 ```
@@ -62,4 +60,3 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
-

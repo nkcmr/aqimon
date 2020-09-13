@@ -10,8 +10,10 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"code.nkcmr.net/sigcancel"
@@ -21,41 +23,81 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
-// cli args
-var (
-	purpleAirSensorID string
-	iftttWebhookKey   string
-)
+type config struct {
+	purpleAirSensorID    string
+	iftttWHKey           string
+	twilioSid, twilioKey string
+	twilioFrom           string
+	smsRecipients        string
+}
+
+func getEnvConfig() config {
+	var cfg config
+	cfg.purpleAirSensorID = os.Getenv("PURPLE_AIR_SENSOR_ID")
+	cfg.iftttWHKey = os.Getenv("IFTTT_WH_KEY")
+	cfg.twilioSid = os.Getenv("TWILIO_ACCT_SID")
+	cfg.twilioKey = os.Getenv("TWILIO_KEY")
+	cfg.twilioFrom = os.Getenv("TWILIO_FROM_NUMBER")
+	cfg.smsRecipients = os.Getenv("SMS_RECIPIENTS")
+	return cfg
+}
+
+func initNotifier(cfg config, rc *retryablehttp.Client) (notifier, error) {
+	var n notifier
+	if cfg.iftttWHKey != "" {
+		n = &iftttNotifier{
+			rc:  rc,
+			key: cfg.iftttWHKey,
+		}
+	} else if cfg.twilioSid != "" && cfg.twilioKey != "" && cfg.smsRecipients != "" && cfg.twilioFrom != "" {
+		n = &smsNotifier{
+			rc:         rc,
+			tfrom:      cfg.twilioFrom,
+			tacctsid:   cfg.twilioSid,
+			tauthtoken: cfg.twilioKey,
+			recipients: strings.Split(cfg.smsRecipients, ","),
+		}
+	} else {
+		return nil, errors.New("improper notification configuration")
+	}
+	return n, nil
+}
 
 func _main() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	go sigcancel.CancelOnSignal(cancel)
 
+	cfg := getEnvConfig()
 	fs := flag.NewFlagSet("aqimon", flag.ContinueOnError)
-	fs.StringVar(&purpleAirSensorID, "sensor_id", os.Getenv("PURPLE_AIR_SENSOR_ID"), "ID of the purple air sensor to watch")
-	fs.StringVar(&iftttWebhookKey, "ifttt_wh_key", os.Getenv("IFTTT_WH_KEY"), "Key for ifttt webhook")
+	fs.StringVar(&cfg.purpleAirSensorID, "sensor_id", cfg.purpleAirSensorID, "ID of the purple air sensor to watch")
+	fs.StringVar(&cfg.iftttWHKey, "ifttt_wh_key", cfg.iftttWHKey, "Key for ifttt webhook")
+	fs.StringVar(&cfg.twilioSid, "twilio_acct_sid", cfg.twilioSid, "Twilio Account SID for sending SMS messages")
+	fs.StringVar(&cfg.twilioKey, "twilio_key", cfg.twilioKey, "Twilio Account Auth Token for sending SMS messages")
+	fs.StringVar(&cfg.twilioFrom, "twilio_from", cfg.twilioFrom, "Twilio phone number to send SMS messages from")
+	fs.StringVar(&cfg.smsRecipients, "sms_recipients", cfg.smsRecipients, "Comma-delimited list of numbers to send SMS messages to")
 	if err := fs.Parse(os.Args); err != nil {
 		return errors.Wrap(err, "failed to parse cli flags")
 	}
-
-	if purpleAirSensorID == "" {
-		return errors.New("empty purpleair sensor id")
-	}
-	if iftttWebhookKey == "" {
-		return errors.New("empty ifttt webhook key")
-	}
-
 	rc := retryablehttp.NewClient()
 	rc.HTTPClient.Timeout = time.Second * 5
+
+	if cfg.purpleAirSensorID == "" {
+		return errors.New("empty purpleair sensor id")
+	}
+
+	n, err := initNotifier(cfg, rc)
+	if err != nil {
+		return errors.Wrap(err, "failed to init notifier")
+	}
 
 	s := new(state)
 	s.justStarted = true
 
-	_ = checkAirQuality(ctx, s, rc)
+	_ = checkAirQuality(ctx, cfg, s, rc, n)
 
 	c := cron.New()
 	_, _ = c.AddFunc("* * * * *", func() {
-		if err := checkAirQuality(ctx, s, rc); err != nil {
+		if err := checkAirQuality(ctx, cfg, s, rc, n); err != nil {
 			log.Printf("error: failed to check air quality: %s", err.Error())
 			return
 		}
@@ -144,6 +186,7 @@ func getPurpleAirSensorData(ctx context.Context, rc *retryablehttp.Client, senso
 	defer cancel()
 	req, _ := retryablehttp.NewRequest("GET", fmt.Sprintf("https://www.purpleair.com/json?show=%s", sensorID), nil)
 	req = req.WithContext(ctx)
+	req.Header.Set("User-Agent", "github.com/nkcmr/aqimon")
 	resp, err := rc.Do(req)
 	if err != nil {
 		return 0, 0, errors.Wrap(err, "failed to send purple air data request")
@@ -188,21 +231,90 @@ type state struct {
 
 const threshold = float64(65)
 
-type iftttWHValues struct {
-	Value1 string `json:"value1,omitempty"`
-	Value2 string `json:"value2,omitempty"`
-	Value3 string `json:"value3,omitempty"`
+type aqiReadings struct {
+	TenMAvg, RT float64
 }
 
-func iftttAlert(ctx context.Context, rc *retryablehttp.Client, eventSlug string, whKey string, v iftttWHValues) error {
+type notifier interface {
+	notify(ctx context.Context, event string, readings aqiReadings) error
+}
+
+type smsNotifier struct {
+	rc                          *retryablehttp.Client
+	tfrom, tacctsid, tauthtoken string
+	recipients                  []string
+}
+
+func (s *smsNotifier) notify(ctx context.Context, event string, readings aqiReadings) error {
+	log.Printf("sms_send_notification: event = %s", event)
 	ctx, cancel := context.WithTimeout(ctx, time.Second*30)
 	defer cancel()
+	message := ""
+	switch event {
+	case "air_quality_good":
+		message = "📉👍 Nearby air quality seems to be getting better. Open windows for fresh air."
+	case "air_quality_bad":
+		message = "📈👎 Nearby air quality is getting bad. Close any open windows."
+	default:
+		return errors.Errorf("unknown notification event: '%s'", event)
+	}
+	message += "\n"
+	message += fmt.Sprintf("(avg10_pm2.5: %.0f, rt_pm2.5: %.0f)", readings.TenMAvg, readings.RT)
+
+	body := url.Values{}
+	body.Set("Body", message)
+	body.Set("From", s.tfrom)
+	for _, n := range s.recipients {
+		body.Set("To", strings.TrimSpace(n))
+		req, _ := retryablehttp.NewRequest("POST", fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%s/Messages.json", s.tacctsid), []byte(body.Encode()))
+		req.Header.Set("User-Agent", "github.com/nkcmr/aqimon")
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.SetBasicAuth(s.tacctsid, s.tauthtoken)
+		req = req.WithContext(ctx)
+
+		resp, err := s.rc.Do(req)
+		if err != nil {
+			return errors.Wrap(err, "failed to send http request to twilio")
+		}
+		defer resp.Body.Close()
+		respBody, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return errors.Wrap(err, "failed to read http response from twilio")
+		}
+		if resp.StatusCode != http.StatusCreated {
+			log.Printf("twilio return body: %s", respBody)
+			return errors.Errorf("unexpected http status returned from twilio (%s)", resp.Status)
+		}
+		_ = respBody
+	}
+	return nil
+}
+
+type iftttNotifier struct {
+	rc  *retryablehttp.Client
+	key string
+}
+
+func (i *iftttNotifier) notify(ctx context.Context, event string, readings aqiReadings) error {
+	log.Printf("ifttt_send_notification: event = %s", event)
+	ctx, cancel := context.WithTimeout(ctx, time.Second*30)
+	defer cancel()
+	type iftttWHValues struct {
+		Value1 string `json:"value1,omitempty"`
+		Value2 string `json:"value2,omitempty"`
+		Value3 string `json:"value3,omitempty"`
+	}
+	v := iftttWHValues{
+		Value1: fmt.Sprintf("%.1f", readings.TenMAvg),
+		Value2: fmt.Sprintf("%.1f", readings.RT),
+	}
 	dat, _ := json.Marshal(v)
 	spew.Dump(v)
-	req, _ := retryablehttp.NewRequest("POST", fmt.Sprintf("https://maker.ifttt.com/trigger/%s/with/key/%s", eventSlug, whKey), dat)
+	req, _ := retryablehttp.NewRequest("POST", fmt.Sprintf("https://maker.ifttt.com/trigger/%s/with/key/%s", event, i.key), dat)
 	req = req.WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := rc.Do(req)
+	req.Header.Set("User-Agent", "github.com/nkcmr/aqimon")
+	resp, err := i.rc.Do(req)
 	if err != nil {
 		return errors.Wrap(err, "failed to send http request to ifttt")
 	}
@@ -214,9 +326,9 @@ func iftttAlert(ctx context.Context, rc *retryablehttp.Client, eventSlug string,
 	return nil
 }
 
-func checkAirQuality(ctx context.Context, s *state, rc *retryablehttp.Client) error {
+func checkAirQuality(ctx context.Context, cfg config, s *state, rc *retryablehttp.Client, n notifier) error {
 	log.Printf("checkAirQuality")
-	rt, tenmavg, err := getPurpleAirSensorData(ctx, rc, purpleAirSensorID)
+	rt, tenmavg, err := getPurpleAirSensorData(ctx, rc, cfg.purpleAirSensorID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get purple air sensor data")
 	}
@@ -232,26 +344,21 @@ func checkAirQuality(ctx context.Context, s *state, rc *retryablehttp.Client) er
 	if s.justStarted {
 		return nil
 	}
+	event := ""
 	if s.last10mReading > threshold && tenmavg <= threshold {
 		// aqi is improving! alert that it might be okay to open windows
-		if err := iftttAlert(ctx, rc, "air_quality_good", iftttWebhookKey, iftttWHValues{
-			Value1: fmt.Sprintf("%.1f", tenmavg),
-			Value2: fmt.Sprintf("%.1f", rt),
-		}); err != nil {
-			return errors.Wrap(err, "failed to send ifttt alert")
-		}
+		event = "air_quality_good"
 	} else if s.last10mReading <= threshold && tenmavg > threshold {
 		// aqi is getting worse :( send alert to close windows
-		if err := iftttAlert(ctx, rc, "air_quality_bad", iftttWebhookKey, iftttWHValues{
-			Value1: fmt.Sprintf("%.1f", tenmavg),
-			Value2: fmt.Sprintf("%.1f", rt),
-		}); err != nil {
-			return errors.Wrap(err, "failed to send ifttt alert")
-		}
+		event = "air_quality_bad"
 	} else {
 		log.Printf("nothing to alert about")
 	}
-	return nil
+
+	return errors.Wrap(n.notify(ctx, event, aqiReadings{
+		TenMAvg: tenmavg,
+		RT:      rt,
+	}), "failed to send notification")
 }
 
 func main() {
