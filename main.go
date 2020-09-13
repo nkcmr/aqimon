@@ -38,6 +38,13 @@ func _main() error {
 		return errors.Wrap(err, "failed to parse cli flags")
 	}
 
+	if purpleAirSensorID == "" {
+		return errors.New("empty purpleair sensor id")
+	}
+	if iftttWebhookKey == "" {
+		return errors.New("empty ifttt webhook key")
+	}
+
 	rc := retryablehttp.NewClient()
 	rc.HTTPClient.Timeout = time.Second * 5
 
