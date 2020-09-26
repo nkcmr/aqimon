@@ -129,7 +129,7 @@ type Results struct {
 	Lat                          float64 `json:"Lat"`
 	Lon                          float64 `json:"Lon"`
 	PM25Value                    string  `json:"PM2_5Value"`
-	LastSeen                     int     `json:"LastSeen"`
+	LastSeen                     int64   `json:"LastSeen"`
 	Type                         string  `json:"Type,omitempty"`
 	Hidden                       string  `json:"Hidden"`
 	DEVICEBRIGHTNESS             string  `json:"DEVICE_BRIGHTNESS,omitempty"`
@@ -214,15 +214,16 @@ func getPurpleAirSensorData(ctx context.Context, rc *retryablehttp.Client, cfg c
 		tenmPM25Readings := make([]float64, len(data.Results))
 		for i := range data.Results {
 			result := data.Results[i]
-			luc := time.Unix(result.LastUpdateCheck, 0).UTC()
-			staleThreshold := now().Add(-(time.Minute * 30))
-			if luc.Before(staleThreshold) {
-				log.Printf("warning: stale data coming from sensor (last_update_check: %s, sensor_id: %s)", luc.Format(time.RFC1123), sensorID)
+			ls := time.Unix(result.LastSeen, 0).UTC()
+			log.Printf("sensor_id:%s last seen %s ago (%s)", sensorID, now().Sub(ls).Round(time.Second).String(), ls.Format(time.RFC1123))
+			staleThreshold := now().Add(-(time.Minute * 10))
+			if ls.Before(staleThreshold) {
+				log.Printf("warning: stale data coming from sensor (last_seen: %s, sensor_id: %s)", ls.Format(time.RFC1123), sensorID)
 				if cfg.backupSensorID != "" && sensorID != cfg.backupSensorID {
 					log.Printf("using backup sensor (sensor_id: %s)", cfg.backupSensorID)
 					return getPurpleAirSensorData(ctx, rc, cfg, cfg.backupSensorID)
 				}
-				return 0, 0, errors.Errorf("stale results returned from purpleair (sensor might be down, last_update_check: %s)", luc.Format(time.RFC1123))
+				return 0, 0, errors.Errorf("stale results returned from purpleair (sensor might be down, last_seen: %s)", ls.Format(time.RFC1123))
 			}
 			var sstats sensorData
 			if err := json.Unmarshal([]byte(result.Stats), &sstats); err != nil {
