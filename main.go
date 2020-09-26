@@ -24,16 +24,17 @@ import (
 )
 
 type config struct {
-	purpleAirSensorID    string
-	iftttWHKey           string
-	twilioSid, twilioKey string
-	twilioFrom           string
-	smsRecipients        string
+	purpleAirSensorID, backupSensorID string
+	iftttWHKey                        string
+	twilioSid, twilioKey              string
+	twilioFrom                        string
+	smsRecipients                     string
 }
 
 func getEnvConfig() config {
 	var cfg config
 	cfg.purpleAirSensorID = os.Getenv("PURPLE_AIR_SENSOR_ID")
+	cfg.backupSensorID = os.Getenv("BACKUP_PURPLE_AIR_SENSOR_ID")
 	cfg.iftttWHKey = os.Getenv("IFTTT_WH_KEY")
 	cfg.twilioSid = os.Getenv("TWILIO_ACCT_SID")
 	cfg.twilioKey = os.Getenv("TWILIO_KEY")
@@ -70,6 +71,7 @@ func _main() error {
 	cfg := getEnvConfig()
 	fs := flag.NewFlagSet("aqimon", flag.ContinueOnError)
 	fs.StringVar(&cfg.purpleAirSensorID, "sensor_id", cfg.purpleAirSensorID, "ID of the purple air sensor to watch")
+	fs.StringVar(&cfg.backupSensorID, "backup_sensor_id", cfg.backupSensorID, "ID of the purple air sensor to use as a backup")
 	fs.StringVar(&cfg.iftttWHKey, "ifttt_wh_key", cfg.iftttWHKey, "Key for ifttt webhook")
 	fs.StringVar(&cfg.twilioSid, "twilio_acct_sid", cfg.twilioSid, "Twilio Account SID for sending SMS messages")
 	fs.StringVar(&cfg.twilioKey, "twilio_key", cfg.twilioKey, "Twilio Account Auth Token for sending SMS messages")
@@ -134,7 +136,7 @@ type Results struct {
 	DEVICEHARDWAREDISCOVERED     string  `json:"DEVICE_HARDWAREDISCOVERED,omitempty"`
 	DEVICEFIRMWAREVERSION        string  `json:"DEVICE_FIRMWAREVERSION,omitempty"`
 	Version                      string  `json:"Version,omitempty"`
-	LastUpdateCheck              int     `json:"LastUpdateCheck,omitempty"`
+	LastUpdateCheck              int64   `json:"LastUpdateCheck,omitempty"`
 	Created                      int     `json:"Created"`
 	Uptime                       string  `json:"Uptime,omitempty"`
 	RSSI                         string  `json:"RSSI,omitempty"`
@@ -181,7 +183,7 @@ func deadManSnitch(ctx context.Context, rc *retryablehttp.Client) {
 	_, _ = rc.Get(snitch)
 }
 
-func getPurpleAirSensorData(ctx context.Context, rc *retryablehttp.Client, sensorID string) (rt, tenmavg float64, err error) {
+func getPurpleAirSensorData(ctx context.Context, rc *retryablehttp.Client, cfg config, sensorID string) (rt, tenmavg float64, err error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Second*30)
 	defer cancel()
 	req, _ := retryablehttp.NewRequest("GET", fmt.Sprintf("https://www.purpleair.com/json?show=%s", sensorID), nil)
@@ -201,11 +203,29 @@ func getPurpleAirSensorData(ctx context.Context, rc *retryablehttp.Client, senso
 		if err := json.Unmarshal(respData, &data); err != nil {
 			return 0, 0, errors.Wrap(err, "failed to json decode purple air response")
 		}
+		if len(data.Results) == 0 {
+			if cfg.backupSensorID != "" && sensorID != cfg.backupSensorID {
+				log.Printf("warning: zero results returned for primary sensor, using backup sensor")
+				return getPurpleAirSensorData(ctx, rc, cfg, cfg.backupSensorID)
+			}
+			return 0, 0, errors.New("zero result for sensor returned from purpleair")
+		}
 		rtPM25Readings := make([]float64, len(data.Results))
 		tenmPM25Readings := make([]float64, len(data.Results))
 		for i := range data.Results {
+			result := data.Results[i]
+			luc := time.Unix(result.LastUpdateCheck, 0).UTC()
+			staleThreshold := now().Add(-(time.Minute * 30))
+			if luc.Before(staleThreshold) {
+				log.Printf("warning: stale data coming from sensor (last_update_check: %s, sensor_id: %s)", luc.Format(time.RFC1123), sensorID)
+				if cfg.backupSensorID != "" && sensorID != cfg.backupSensorID {
+					log.Printf("using backup sensor (sensor_id: %s)", cfg.backupSensorID)
+					return getPurpleAirSensorData(ctx, rc, cfg, cfg.backupSensorID)
+				}
+				return 0, 0, errors.Errorf("stale results returned from purpleair (sensor might be down, last_update_check: %s)", luc.Format(time.RFC1123))
+			}
 			var sstats sensorData
-			if err := json.Unmarshal([]byte(data.Results[i].Stats), &sstats); err != nil {
+			if err := json.Unmarshal([]byte(result.Stats), &sstats); err != nil {
 				return 0, 0, errors.Wrap(err, "failed to json decode sensor data")
 			}
 			rtPM25Readings[i] = sstats.V
@@ -214,6 +234,10 @@ func getPurpleAirSensorData(ctx context.Context, rc *retryablehttp.Client, senso
 		return aqiFromPM(avg(rtPM25Readings)), aqiFromPM(avg(tenmPM25Readings)), nil
 	}
 	return 0, 0, errors.Errorf("unexpected status code returned (%s)", resp.Status)
+}
+
+func now() time.Time {
+	return time.Now().UTC()
 }
 
 func avg(n []float64) float64 {
@@ -328,7 +352,7 @@ func (i *iftttNotifier) notify(ctx context.Context, event string, readings aqiRe
 
 func checkAirQuality(ctx context.Context, cfg config, s *state, rc *retryablehttp.Client, n notifier) error {
 	log.Printf("checkAirQuality")
-	rt, tenmavg, err := getPurpleAirSensorData(ctx, rc, cfg.purpleAirSensorID)
+	rt, tenmavg, err := getPurpleAirSensorData(ctx, rc, cfg, cfg.purpleAirSensorID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get purple air sensor data")
 	}
