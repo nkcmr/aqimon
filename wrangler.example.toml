@@ -1,0 +1,24 @@
+name = "aqimon"
+type = "javascript"
+account_id = "<cloudflare_account_id>"
+workers_dev = true
+usage_model = 'bundled'
+kv_namespaces = [
+  { binding = "STATE", id = "<cloudflare_workers_kv_namesapce_id>" },
+]
+
+[build]
+command = "make"
+
+[build.upload]
+format = "service-worker"
+
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+SENSOR_IDS = "67381,62285" # comma delimited list of sensor ids
+SMS_RECIPIENTS = "+14155551234" # comma delimited list of numbers to text
+TWILIO_FROM = "+14155559999" # number that twilio sends from
+TWILIO_ACCOUNT_SID = "<twilio_account_sid>"
+TWILIO_AUTH_TOKEN = "<twilio_auth_token>"
