@@ -1,2 +1,4 @@
-aqimon_linux_armv5
-env
+build/
+/wrangler.toml
+node_modules
+.DS_Store

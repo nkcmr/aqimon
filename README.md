@@ -1,46 +1,21 @@
 # aqimon
 
-a simple daemon that pulls [PurpleAir](https://www2.purpleair.com) sensor data and watches if AQI crosses a threshold, then sends [IFTTT](https://ifttt.com) or Twilio SMS webhooks about it. i use the webhooks to trigger iOS notifications that tell me when I can open/close my windows to let fresh air in.
+a simple cloudflare worker that pulls [PurpleAir](https://www2.purpleair.com) sensor data and watches if AQI crosses a threshold, then sends text messages (over Twilio) about it.
 
 ## installation
 
-i am running my daemon on a raspberry pi i have sitting around, so installation for that looks like this:
+this thing is deployed to cloudflare workers, so all you pretty much need to do is configure and go:
 
 ```
-$ git clone https://github.com/nkcmr/aqimon.git
-...
-$ cd aqimond
-$ make # requires >=go1.15
-$ ls
-README.md  aqimon_linux_armv5  go.mod  go.sum  main.go  makefile
+$ cp wrangler.example.toml wrangler.toml
+... fill out the stuff in wrangler.toml with your CF account details and twilio details ...
+$ wrangler publish
 ```
-
-copy the `aqimon_linux_armv5` to a raspberry pi, and i set up the daemon as a systemd service with this unit file:
-
-```
-[Unit]
-Description=AQI Monitor Daemon
-After=multi-user.target
-
-[Service]
-Type=idle
-Environment=PURPLE_AIR_SENSOR_ID=<find your closest PurpleAir sensor ID>
-Environment=IFTTT_WH_KEY=<put you IFTTT webhook key here>
-Environment=DEADMAN_SNITCH=<use deadman snitch url[0] to make sure this doesn't stop working>
-ExecStart=/home/pi/aqimon_linux_armv5
-Restart=on-failure
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-```
-
-[0]: https://deadmanssnitch.com
 
 ## license
 
 ```
-Copyright (c) 2020 Nicholas Comer
+Copyright (c) 2021 Nicholas Comer
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
