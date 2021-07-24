@@ -3,7 +3,8 @@
     "@cloudflare/workers-types": "^2.2.2",
     "@types/node": "^16.3.1",
     "buffer": "^6.0.3",
-    "esbuild": "^0.12.15"
+    "esbuild": "^0.12.15",
+    "phpdate": "^1.0.0"
   },
   "main": "./build/worker.js"
 }

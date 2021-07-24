@@ -44,10 +44,8 @@ class NRLogger {
     return out;
   }
 
-  flush(): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      // TODO: implement
-    });
+  async flush(): Promise<void> {
+    return;
   }
 }
 

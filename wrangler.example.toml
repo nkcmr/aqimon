@@ -22,3 +22,4 @@ SMS_RECIPIENTS = "+14155551234" # comma delimited list of numbers to text
 TWILIO_FROM = "+14155559999" # number that twilio sends from
 TWILIO_ACCOUNT_SID = "<twilio_account_sid>"
 TWILIO_AUTH_TOKEN = "<twilio_auth_token>"
+TWILIO_WH_PSK = "a good secret to auth twilio webhooks with"
