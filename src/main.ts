@@ -14,6 +14,7 @@ declare const TWILIO_ACCOUNT_SID: string;
 declare const TWILIO_AUTH_TOKEN: string;
 declare const SENSOR_IDS: string;
 declare const TWILIO_WH_PSK: string;
+declare const PURPLE_AIR_READ_API_KEY: string;
 
 // kv bindings
 declare const STATE: KVNamespace;
@@ -43,7 +44,7 @@ async function processRequest(req: Request): Promise<Response> {
         return await incomingMessage(req, url);
     }
     return noopResponse();
-  } catch (e) {
+  } catch (e: any) {
     logError("failed to process request", { error: e.message });
     return errorResponse(e.message);
   } finally {
@@ -84,14 +85,19 @@ async function incomingMessage(req: Request, url: URL): Promise<Response> {
 
 async function generateReport(): Promise<Response> {
   logInfo("generateReport");
-  let results = await getSensorData(SENSOR_IDS.split(","));
+  let results = await getSensorData(
+    SENSOR_IDS.split(",").shift() || "undefined"
+  );
   let indicator = results.tenMinuteAvg > AQ_THRESHOLD ? "🔴" : "🟢";
   return new Response(
     [
       `📋${indicator} Current Readings (as of ${currentTimestamp()} UTC):`,
-      `Realtime PM2.5: ${roundToDecimal(results.realtime, 0)}`,
-      `10 min. average: ${roundToDecimal(results.tenMinuteAvg, 0)}`,
-    ].join("\n"),
+      `Realtime AQI: ${roundToDecimal(results.realtime, 0)}`,
+      `10 min. average AQI: ${roundToDecimal(results.tenMinuteAvg, 0)}`,
+      results.stale && `(⚠️ data might be stale)`,
+    ]
+      .filter((v) => !!v)
+      .join("\n"),
     {
       headers: {
         "Content-Type": "text/plain",
@@ -110,7 +116,7 @@ addEventListener("fetch", (event) => {
 
 addEventListener("scheduled", (event) => {
   event.waitUntil(
-    checkAirQuality().then(() => {
+    checkAirQuality().finally(() => {
       return flushLogs();
     })
   );
@@ -131,7 +137,9 @@ const AQ_THRESHOLD = 65;
 async function checkAirQuality(): Promise<void> {
   try {
     logInfo("checkAirQuality");
-    let results = await getSensorData(SENSOR_IDS.split(","));
+    let results = await getSensorData(
+      SENSOR_IDS.split(",").shift() || "undefined"
+    );
     logInfo("current_readings", { ...results });
     let lastReadings = await previousReadings();
     await storeReadings(results);
@@ -156,11 +164,11 @@ async function checkAirQuality(): Promise<void> {
       return;
     }
     await notify(event, results);
-  } catch (e) {
+  } catch (e: any) {
     logError("failed to check air quality", {
       error: e.message,
     });
-    return;
+    throw e;
   }
 }
 
@@ -185,10 +193,13 @@ async function notify(
       break;
   }
   message += "\n";
-  message += `(avg10_pm2.5: ${roundToDecimal(
+  message += `(avg10_aqi: ${roundToDecimal(
     readings.tenMinuteAvg,
     0
-  )}, rt_pm2.5: ${roundToDecimal(readings.realtime, 0)})`;
+  )}, rt_aqi: ${roundToDecimal(readings.realtime, 0)})`;
+  if (readings.stale) {
+    message += "\n(⚠️ data might be stale)";
+  }
   for (let phoneNumber of SMS_RECIPIENTS.split(",").map((s) => s.trim())) {
     await sendSms(phoneNumber, message);
   }

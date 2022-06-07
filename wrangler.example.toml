@@ -23,3 +23,4 @@ TWILIO_FROM = "+14155559999" # number that twilio sends from
 TWILIO_ACCOUNT_SID = "<twilio_account_sid>"
 TWILIO_AUTH_TOKEN = "<twilio_auth_token>"
 TWILIO_WH_PSK = "a good secret to auth twilio webhooks with"
+PURPLE_AIR_READ_API_KEY = "gotta email them to get one of these"

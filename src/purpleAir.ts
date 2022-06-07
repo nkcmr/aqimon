@@ -1,57 +1,32 @@
-import { logInfo } from "./newRelic";
-
+declare const PURPLE_AIR_READ_API_KEY: string;
 const STALE_THRESHOLD = 1000 * 60 * 10;
 
 export type SensorResults = {
   realtime: number;
   tenMinuteAvg: number;
+  stale: boolean;
 };
 
-export async function getSensorData(
-  sensorIDs: string[]
-): Promise<SensorResults> {
-  SENSOR_ITER: for (let sensorID of sensorIDs) {
-    let response = await fetch(
-      `https://www.purpleair.com/json?show=${sensorID}`,
-      { headers: { "user-agent": "github.com/nkcmr/aqimon" } }
+export async function getSensorData(sensorID: string): Promise<SensorResults> {
+  let response = await fetch(
+    `https://api.purpleair.com/v1/sensors/${sensorID}`,
+    {
+      headers: {
+        "x-api-key": PURPLE_AIR_READ_API_KEY,
+      },
+    }
+  );
+  if (!response.ok) {
+    throw new Error(
+      `non-ok status code returned from purple air (${response.statusText})`
     );
-    if (!response.ok) {
-      throw new Error(
-        `non-ok status code returned from purple air (${response.statusText})`
-      );
-    }
-    let result = (await response.json()) as PurpleAir;
-    if (result.results.length === 0) {
-      logInfo("purple air sensor returned zero results", { sensorID });
-      continue;
-    }
-    const rtPM25Readings: number[] = [];
-    const tenmPM25Readings: number[] = [];
-    for (let subResult of result.results) {
-      const lastSeen = new Date(subResult.LastSeen * 1000);
-      if (Date.now() - subResult.LastSeen * 1000 > STALE_THRESHOLD) {
-        logInfo("stale data coming from sensor", { sensorID, lastSeen });
-        continue SENSOR_ITER;
-      }
-      try {
-        const stats = JSON.parse(subResult.Stats);
-        if (typeof stats.v !== "number" || typeof stats.v1 !== "number") {
-          throw new Error(`unexpected structure/data for result.stats`);
-        }
-        rtPM25Readings.push(stats.v);
-        tenmPM25Readings.push(stats.v1);
-      } catch (e) {
-        throw new Error(
-          `failed to json decode results stats: ${e.message} ${result}`
-        );
-      }
-    }
-    return {
-      realtime: aqiFromPM(avg(rtPM25Readings)),
-      tenMinuteAvg: aqiFromPM(avg(tenmPM25Readings)),
-    };
   }
-  throw new Error("all sensors returned unusable results");
+  let result = (await response.json()) as PurpleAir;
+  return {
+    realtime: aqiFromPM(result.sensor.stats["pm2.5"]),
+    tenMinuteAvg: aqiFromPM(result.sensor.stats["pm2.5_10minute"]),
+    stale: Date.now() - result.sensor.stats.time_stamp * 1000 > STALE_THRESHOLD,
+  };
 }
 
 function aqiFromPM(pm: number): number {
@@ -105,18 +80,18 @@ function calcAQI(
 }
 
 function avg(nums: number[]): number {
-  let total = 0;
-  for (let n of nums) {
-    total += n;
+  if (nums.length === 0) {
+    return NaN;
   }
-  return total / nums.length;
+  return nums.reduce((acc, n) => acc + n, 0) / nums.length;
 }
 
 export interface PurpleAir {
-  results: Result[];
-}
-
-export interface Result {
-  LastSeen: number;
-  Stats: string;
+  sensor: {
+    stats: {
+      "pm2.5": number;
+      "pm2.5_10minute": number;
+      time_stamp: number;
+    };
+  };
 }
