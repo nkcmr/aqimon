@@ -1,9 +1,11 @@
 {
   "dependencies": {
     "@cloudflare/workers-types": "^4.20230307.0",
+    "@types/luxon": "^3.2.0",
     "@types/node": "^18.15.3",
     "buffer": "^6.0.3",
     "esbuild": "^0.17.12",
+    "luxon": "^3.3.0",
     "phpdate": "^1.0.0"
   },
   "main": "./build/worker.js"

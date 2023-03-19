@@ -1,3 +1,4 @@
+import { DateTime } from "luxon";
 import { date } from "phpdate";
 import { flushToString as flushLogs, logError, logInfo } from "./newRelic";
 import { getSensorData, SensorResults } from "./purpleAir";
@@ -5,6 +6,7 @@ import { getSensorData, SensorResults } from "./purpleAir";
 declare const SENSOR_IDS: string;
 declare const PUSHOVER_APPLICATION_TOKEN: string;
 declare const PUSHOVER_USER_TARGET: string;
+declare const LOCAL_IANA_TIME_ZONE: string;
 
 // kv bindings
 declare const STATE: KVNamespace;
@@ -38,9 +40,14 @@ async function generateReport(): Promise<void> {
 }
 
 async function sendDailyReport(): Promise<void> {
-  const now = new Date();
-  const nowUnix = Math.round(now.getTime() / 1_000);
-  if (now.getHours() < 12) {
+  const nowLocal = DateTime.now().setZone(LOCAL_IANA_TIME_ZONE);
+  if (!nowLocal.isValid) {
+    throw new Error(
+      `invalid timestamp, probably caused by bad time zone setting`
+    );
+  }
+  const nowUnix = nowLocal.toUnixInteger();
+  if (nowLocal.hour < 8) {
     return;
   }
   const lastReportStr = await STATE.get<string>("last_successful_daily_report");

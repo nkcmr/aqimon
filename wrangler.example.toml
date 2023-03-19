@@ -17,4 +17,5 @@ crons = ["*/30 * * * *"]
 SENSOR_IDS = "67381,62285" # comma delimited list of sensor ids
 PUSHOVER_APPLICATION_TOKEN = ""
 PUSHOVER_USER_TARGET = ""
+LOCAL_IANA_TIME_ZONE = "America/New_York"
 PURPLE_AIR_READ_API_KEY = "gotta email them to get one of these"
