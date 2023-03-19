@@ -45,8 +45,12 @@ async function generateReport(): Promise<string> {
     .setZone(LOCAL_IANA_TIME_ZONE)
     .toLocaleString(DateTime.DATETIME_FULL);
   let indicator = results.tenMinuteAvg > AQ_THRESHOLD ? "🔴" : "🟢";
+  let forPlace = "";
+  if (results.placeName) {
+    forPlace = ` for ${results.placeName}`;
+  }
   const message = [
-    `📋${indicator} Current Readings:`,
+    `📋${indicator} Current Readings${forPlace}:`,
     `Data Timestamp: ${timeString}`,
     `Realtime AQI: ${roundToDecimal(results.realtime, 0)}`,
     `10 min. average AQI: ${roundToDecimal(results.tenMinuteAvg, 0)}`,

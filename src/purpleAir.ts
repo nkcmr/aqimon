@@ -1,11 +1,16 @@
-declare const PURPLE_AIR_READ_API_KEY: string;
-const STALE_THRESHOLD = 1000 * 60 * 10;
-
 import { z } from "zod";
+
+declare const PURPLE_AIR_READ_API_KEY: string;
+declare const GOOGLE_MAPS_GEOCODING_API_KEY: string;
+declare const STATE: KVNamespace;
+
+const STALE_THRESHOLD = 1000 * 60 * 10;
 
 const purpleAirSensorResponseSchema = z.object({
   data_time_stamp: z.number(),
   sensor: z.object({
+    latitude: z.number(),
+    longitude: z.number(),
     stats: z.object({
       "pm2.5": z.number(),
       "pm2.5_10minute": z.number(),
@@ -15,10 +20,47 @@ const purpleAirSensorResponseSchema = z.object({
 
 export type SensorResults = {
   ts: number;
+  placeName: string | undefined;
   realtime: number;
   tenMinuteAvg: number;
   stale: boolean;
 };
+
+async function getPlaceName(lat: number, long: number): Promise<string> {
+  const stateKey = `placename:${lat},${long}`;
+  let placeNameResult = await STATE.get<{ result: string }>(stateKey, "json");
+  if (!placeNameResult) {
+    const response = await fetch(
+      `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${long}&key=${GOOGLE_MAPS_GEOCODING_API_KEY}`
+    );
+    if (!response.ok) {
+      throw new Error(
+        `non-ok response returned from google maps geocoding API: ${response.statusText}`
+      );
+    }
+    const data = (await response.json()) as any;
+    typeLoop: for (let resultType of [
+      "neighborhood",
+      "sublocality_level_1",
+      "administrative_area_level_2",
+      "locality",
+    ]) {
+      for (let result of data.results) {
+        if ((result.types as string[]).includes(resultType)) {
+          placeNameResult = { result: result.formatted_address };
+          break typeLoop;
+        }
+      }
+    }
+    if (!placeNameResult) {
+      throw new Error("failed to find suitable formatted address for lat,long");
+    }
+    await STATE.put(stateKey, JSON.stringify(placeNameResult), {
+      expirationTtl: 31534272,
+    });
+  }
+  return placeNameResult!.result;
+}
 
 export async function getSensorData(sensorID: string): Promise<SensorResults> {
   let response = await fetch(
@@ -37,8 +79,16 @@ export async function getSensorData(sensorID: string): Promise<SensorResults> {
   const result = await purpleAirSensorResponseSchema.parseAsync(
     await response.json()
   );
+  let placeName: string | undefined;
+  try {
+    placeName = await getPlaceName(
+      result.sensor.latitude,
+      result.sensor.longitude
+    );
+  } catch {}
   return {
     ts: result.data_time_stamp,
+    placeName,
     realtime: aqiFromPM(result.sensor.stats["pm2.5"]),
     tenMinuteAvg: aqiFromPM(result.sensor.stats["pm2.5_10minute"]),
     stale: Date.now() - result.data_time_stamp * 1000 > STALE_THRESHOLD,
