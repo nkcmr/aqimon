@@ -1,109 +1,54 @@
-import { Buffer } from "buffer/";
 import { date } from "phpdate";
-import {
-  flush as flushLogsToNR,
-  flushToString as flushLogs,
-  logError,
-  logInfo,
-} from "./newRelic";
+import { flushToString as flushLogs, logError, logInfo } from "./newRelic";
 import { getSensorData, SensorResults } from "./purpleAir";
 // var bindings
-declare const SMS_RECIPIENTS: string;
-declare const TWILIO_FROM: string;
-declare const TWILIO_ACCOUNT_SID: string;
-declare const TWILIO_AUTH_TOKEN: string;
 declare const SENSOR_IDS: string;
-declare const TWILIO_WH_PSK: string;
-declare const PURPLE_AIR_READ_API_KEY: string;
+declare const PUSHOVER_APPLICATION_TOKEN: string;
+declare const PUSHOVER_USER_TARGET: string;
 
 // kv bindings
 declare const STATE: KVNamespace;
 
 function noopResponse(): Response {
-  return new Response("", {
-    status: 200,
+  return new Response("404 page not found", {
+    status: 404,
     headers: { "content-type": "text/plain" },
   });
 }
 
-function errorResponse(message: string): Response {
-  return new Response(`error: ${message}` + "\n", {
-    status: 500,
-    headers: { "content-type": "text/plain" },
-  });
-}
-
-async function processRequest(req: Request): Promise<Response> {
-  try {
-    if (req.method !== "POST") {
-      return noopResponse();
-    }
-    const url = new URL(req.url);
-    switch (url.pathname) {
-      case "/incoming-message":
-        return await incomingMessage(req, url);
-    }
-    return noopResponse();
-  } catch (e: any) {
-    logError("failed to process request", { error: e.message });
-    return errorResponse(e.message);
-  } finally {
-    await flushLogsToNR();
-  }
-}
-
-async function incomingMessage(req: Request, url: URL): Promise<Response> {
-  const psk = url.searchParams.get("psk");
-  if (psk !== TWILIO_WH_PSK) {
-    return errorResponse("invalid psk");
-  }
-  const bodyText = await req.text();
-  const body = new URLSearchParams(bodyText);
-  const from = body.get("From");
-  if (!from) {
-    return errorResponse("no from");
-  }
-  // determine if from is from any of the sms recipients
-  const fromIsRecipient = SMS_RECIPIENTS.split(",").some(
-    (recipient) => recipient === from
-  );
-  if (!fromIsRecipient) {
-    logInfo("message from an unknown number", { from, body });
-    return noopResponse();
-  }
-  logInfo("message from known number", { from, body });
-  const contents = body.get("Body");
-  if (!contents || contents.trim().length === 0) {
-    return noopResponse();
-  }
-  switch (contents.toLowerCase().trim()) {
-    case "report":
-      return await generateReport();
-  }
-  return errorResponse("unknown command");
-}
-
-async function generateReport(): Promise<Response> {
+async function generateReport(): Promise<void> {
   logInfo("generateReport");
   let results = await getSensorData(
     SENSOR_IDS.split(",").shift() || "undefined"
   );
   let indicator = results.tenMinuteAvg > AQ_THRESHOLD ? "🔴" : "🟢";
-  return new Response(
-    [
-      `📋${indicator} Current Readings (as of ${currentTimestamp()} UTC):`,
-      `Realtime AQI: ${roundToDecimal(results.realtime, 0)}`,
-      `10 min. average AQI: ${roundToDecimal(results.tenMinuteAvg, 0)}`,
-      results.stale && `(⚠️ data might be stale)`,
-    ]
-      .filter((v) => !!v)
-      .join("\n"),
-    {
-      headers: {
-        "Content-Type": "text/plain",
-      },
-    }
+  const message = [
+    `📋${indicator} Current Readings (as of ${currentTimestamp()} UTC):`,
+    `Realtime AQI: ${roundToDecimal(results.realtime, 0)}`,
+    `10 min. average AQI: ${roundToDecimal(results.tenMinuteAvg, 0)}`,
+    results.stale && `(⚠️ data might be stale)`,
+  ]
+    .filter((v) => !!v)
+    .join("\n");
+  await publishPushoverMessage(
+    PUSHOVER_APPLICATION_TOKEN,
+    PUSHOVER_USER_TARGET,
+    message
   );
+}
+
+async function sendDailyReport(): Promise<void> {
+  const now = new Date();
+  const nowUnix = Math.round(now.getTime() / 1_000);
+  if (now.getHours() < 12) {
+    return;
+  }
+  const lastReportStr = await STATE.get<string>("last_successful_daily_report");
+  const lastReport = parseInt(lastReportStr ?? "0", 10);
+  if (lastReport + 82800 < nowUnix) {
+    await generateReport();
+    await STATE.put("last_successful_daily_report", `${nowUnix}`);
+  }
 }
 
 function currentTimestamp(): string {
@@ -111,12 +56,12 @@ function currentTimestamp(): string {
 }
 
 addEventListener("fetch", (event) => {
-  event.respondWith(processRequest(event.request));
+  event.respondWith(noopResponse());
 });
 
 addEventListener("scheduled", (event) => {
   event.waitUntil(
-    checkAirQuality().finally(() => {
+    Promise.all([sendDailyReport(), checkAirQuality()]).finally(() => {
       return flushLogs();
     })
   );
@@ -200,37 +145,30 @@ async function notify(
   if (readings.stale) {
     message += "\n(⚠️ data might be stale)";
   }
-  for (let phoneNumber of SMS_RECIPIENTS.split(",").map((s) => s.trim())) {
-    await sendSms(phoneNumber, message);
-  }
-}
-
-async function sendSms(to: string, message: string): Promise<void> {
-  const body = new URLSearchParams();
-  body.set("Body", message);
-  body.set("From", TWILIO_FROM);
-  body.set("To", to);
-  const res = await fetch(
-    `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
-    {
-      method: "POST",
-      headers: {
-        "user-agent": "github.com/nkcmr/aqimon",
-        "content-type": "application/x-www-form-urlencoded",
-        accept: "application/json",
-        authorization: twilioAuthHeader(),
-      },
-      body: body.toString(),
-    }
+  await publishPushoverMessage(
+    PUSHOVER_APPLICATION_TOKEN,
+    PUSHOVER_USER_TARGET,
+    message
   );
-  if (!res.ok) {
-    logError("non-ok response body", { body: await res.text() });
-    throw new Error(`non-ok status returned from twilio (${res.statusText})`);
-  }
 }
 
-function twilioAuthHeader(): string {
-  return `Basic ${Buffer.from(
-    `${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`
-  ).toString("base64")}`;
+async function publishPushoverMessage(
+  applicationToken: string,
+  to: string,
+  message: string
+): Promise<void> {
+  await fetch("https://api.pushover.net/1/messages.json", {
+    method: "POST",
+    headers: {
+      "user-agent": "github.com/nkcmr/aqimon",
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify({
+      token: applicationToken,
+      user: to,
+      message,
+      priority: -1,
+    }),
+  });
 }

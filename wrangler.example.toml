@@ -1,5 +1,5 @@
 name = "aqimon"
-type = "javascript"
+compatibility_date = "2022-11-02"
 account_id = "<cloudflare_account_id>"
 workers_dev = true
 usage_model = 'bundled'
@@ -10,17 +10,11 @@ kv_namespaces = [
 [build]
 command = "make"
 
-[build.upload]
-format = "service-worker"
-
 [triggers]
-crons = ["* * * * *"]
+crons = ["*/30 * * * *"]
 
 [vars]
 SENSOR_IDS = "67381,62285" # comma delimited list of sensor ids
-SMS_RECIPIENTS = "+14155551234" # comma delimited list of numbers to text
-TWILIO_FROM = "+14155559999" # number that twilio sends from
-TWILIO_ACCOUNT_SID = "<twilio_account_sid>"
-TWILIO_AUTH_TOKEN = "<twilio_auth_token>"
-TWILIO_WH_PSK = "a good secret to auth twilio webhooks with"
+PUSHOVER_APPLICATION_TOKEN = ""
+PUSHOVER_USER_TARGET = ""
 PURPLE_AIR_READ_API_KEY = "gotta email them to get one of these"

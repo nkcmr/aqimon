@@ -1,6 +1,6 @@
 # aqimon
 
-a simple cloudflare worker that pulls [PurpleAir](https://www2.purpleair.com) sensor data and watches if AQI crosses a threshold, then sends text messages (over Twilio) about it.
+a simple cloudflare worker on a cron trigger that pulls [PurpleAir](https://www2.purpleair.com) sensor data and watches if AQI crosses a threshold, then sends a pushover message about it.
 
 ## installation
 
@@ -8,14 +8,14 @@ this thing is deployed to cloudflare workers, so all you pretty much need to do 
 
 ```
 $ cp wrangler.example.toml wrangler.toml
-... fill out the stuff in wrangler.toml with your CF account details and twilio details ...
-$ wrangler publish
+... fill out the stuff in wrangler.toml with your CF account details, purple air key and pushover details ...
+$ wrangler publish ./build/worker.js
 ```
 
 ## license
 
 ```
-Copyright (c) 2021 Nicholas Comer
+Copyright (c) 2023 Nicholas Comer
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
