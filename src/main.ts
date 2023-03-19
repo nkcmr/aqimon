@@ -2,41 +2,59 @@ import { DateTime } from "luxon";
 import { date } from "phpdate";
 import { flushToString as flushLogs, logError, logInfo } from "./newRelic";
 import { getSensorData, SensorResults } from "./purpleAir";
+import { Router } from "./router";
 // var bindings
 declare const SENSOR_IDS: string;
 declare const PUSHOVER_APPLICATION_TOKEN: string;
 declare const PUSHOVER_USER_TARGET: string;
 declare const LOCAL_IANA_TIME_ZONE: string;
+declare const PRIVATE_REPORT_URL: string;
+declare const HOSTNAME: string;
 
 // kv bindings
 declare const STATE: KVNamespace;
 
-function noopResponse(): Response {
-  return new Response("404 page not found", {
-    status: 404,
-    headers: { "content-type": "text/plain" },
-  });
+async function getAdhocReportReadings(): Promise<SensorResults> {
+  const nowUTC = DateTime.utc();
+  const nowUnix = nowUTC.toUnixInteger();
+  const lastAdhocReportRefreshStr = await STATE.get(
+    "last_adhoc_report_refresh",
+    "text"
+  );
+  const lastAdhocReportRefresh = parseInt(lastAdhocReportRefreshStr ?? "0");
+  const secondsSince = nowUnix - lastAdhocReportRefresh;
+  const prevReadings = await previousReadings();
+  if (secondsSince > 1800 || !prevReadings) {
+    const results = await getSensorData(
+      SENSOR_IDS.split(",").shift() || "undefined"
+    );
+    await storeReadings(results);
+    await STATE.put("last_adhoc_report_refresh", `${nowUnix}`);
+    return results;
+  }
+  console.log(
+    `ad-hoc report refreshed only ${secondsSince} second(s) ago, returning previous data`
+  );
+  return prevReadings;
 }
 
-async function generateReport(): Promise<void> {
+async function generateReport(): Promise<string> {
   logInfo("generateReport");
-  let results = await getSensorData(
-    SENSOR_IDS.split(",").shift() || "undefined"
-  );
+  let results = await getAdhocReportReadings();
+  const timeString = DateTime.fromSeconds(results.ts)
+    .setZone(LOCAL_IANA_TIME_ZONE)
+    .toLocaleString(DateTime.DATETIME_FULL);
   let indicator = results.tenMinuteAvg > AQ_THRESHOLD ? "🔴" : "🟢";
   const message = [
-    `📋${indicator} Current Readings (as of ${currentTimestamp()} UTC):`,
+    `📋${indicator} Current Readings:`,
+    `Data Timestamp: ${timeString}`,
     `Realtime AQI: ${roundToDecimal(results.realtime, 0)}`,
     `10 min. average AQI: ${roundToDecimal(results.tenMinuteAvg, 0)}`,
     results.stale && `(⚠️ data might be stale)`,
   ]
     .filter((v) => !!v)
     .join("\n");
-  await publishPushoverMessage(
-    PUSHOVER_APPLICATION_TOKEN,
-    PUSHOVER_USER_TARGET,
-    message
-  );
+  return message;
 }
 
 async function sendDailyReport(): Promise<void> {
@@ -53,7 +71,13 @@ async function sendDailyReport(): Promise<void> {
   const lastReportStr = await STATE.get<string>("last_successful_daily_report");
   const lastReport = parseInt(lastReportStr ?? "0", 10);
   if (lastReport + 82800 < nowUnix) {
-    await generateReport();
+    const message = await generateReport();
+    await publishPushoverMessage(
+      PUSHOVER_APPLICATION_TOKEN,
+      PUSHOVER_USER_TARGET,
+      message
+    );
+
     await STATE.put("last_successful_daily_report", `${nowUnix}`);
   }
 }
@@ -62,8 +86,33 @@ function currentTimestamp(): string {
   return date("F j, Y, g:i a");
 }
 
+// @ts-ignore
+import indexhtml from "./index.html";
+
+const r = Router.create((handle) => {
+  handle("POST", `${PRIVATE_REPORT_URL}/refresh`, async () => {
+    return new Response("", {
+      status: 302,
+      headers: {
+        Location: PRIVATE_REPORT_URL,
+      },
+    });
+  });
+  handle("GET", PRIVATE_REPORT_URL, async (request) => {
+    const message = await generateReport();
+    return new Response(
+      (indexhtml as string).replaceAll("{{message}}", `${message}`),
+      {
+        headers: {
+          "content-type": "text/html",
+        },
+      }
+    );
+  });
+});
+
 addEventListener("fetch", (event) => {
-  event.respondWith(noopResponse());
+  event.respondWith(r.handle(event.request, {}, event));
 });
 
 addEventListener("scheduled", (event) => {
@@ -174,8 +223,9 @@ async function publishPushoverMessage(
     body: JSON.stringify({
       token: applicationToken,
       user: to,
-      message,
+      message: message + "\n(Click this message to get a real-time report)",
       priority: -1,
+      url: `https://${HOSTNAME}${PRIVATE_REPORT_URL}`,
     }),
   });
 }

@@ -1,7 +1,20 @@
 declare const PURPLE_AIR_READ_API_KEY: string;
 const STALE_THRESHOLD = 1000 * 60 * 10;
 
+import { z } from "zod";
+
+const purpleAirSensorResponseSchema = z.object({
+  data_time_stamp: z.number(),
+  sensor: z.object({
+    stats: z.object({
+      "pm2.5": z.number(),
+      "pm2.5_10minute": z.number(),
+    }),
+  }),
+});
+
 export type SensorResults = {
+  ts: number;
   realtime: number;
   tenMinuteAvg: number;
   stale: boolean;
@@ -21,11 +34,14 @@ export async function getSensorData(sensorID: string): Promise<SensorResults> {
       `non-ok status code returned from purple air (${response.statusText})`
     );
   }
-  let result = (await response.json()) as PurpleAir;
+  const result = await purpleAirSensorResponseSchema.parseAsync(
+    await response.json()
+  );
   return {
+    ts: result.data_time_stamp,
     realtime: aqiFromPM(result.sensor.stats["pm2.5"]),
     tenMinuteAvg: aqiFromPM(result.sensor.stats["pm2.5_10minute"]),
-    stale: Date.now() - result.sensor.stats.time_stamp * 1000 > STALE_THRESHOLD,
+    stale: Date.now() - result.data_time_stamp * 1000 > STALE_THRESHOLD,
   };
 }
 
