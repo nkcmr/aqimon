@@ -1,48 +1,51 @@
 import { DateTime } from "luxon";
-import { date } from "phpdate";
+import { z } from "zod";
+import { Env } from "./env";
 import { flushToString as flushLogs, logError, logInfo } from "./newRelic";
-import { getSensorData, SensorResults } from "./purpleAir";
+import { SensorResults, getSensorData } from "./purpleAir";
 import { Router } from "./router";
-// var bindings
-declare const SENSOR_IDS: string;
-declare const PUSHOVER_APPLICATION_TOKEN: string;
-declare const PUSHOVER_USER_TARGET: string;
-declare const LOCAL_IANA_TIME_ZONE: string;
-declare const PRIVATE_REPORT_URL: string;
-declare const HOSTNAME: string;
 
-// kv bindings
-declare const STATE: KVNamespace;
+const operationModeSchema = z.union([
+  z.literal("daily"),
+  z.literal("adhoc"),
+  z.literal("interval"),
+]);
 
-async function getAdhocReportReadings(): Promise<SensorResults> {
+type OperationMode = z.infer<typeof operationModeSchema>;
+
+async function getAdhocReportReadings(
+  env: Env,
+  kind: "daily" | "adhoc"
+): Promise<SensorResults> {
   const nowUTC = DateTime.utc();
   const nowUnix = nowUTC.toUnixInteger();
-  const lastAdhocReportRefreshStr = await STATE.get(
-    "last_adhoc_report_refresh",
-    "text"
-  );
-  const lastAdhocReportRefresh = parseInt(lastAdhocReportRefreshStr ?? "0");
-  const secondsSince = nowUnix - lastAdhocReportRefresh;
-  const prevReadings = await previousReadings();
-  if (secondsSince > 1800 || !prevReadings) {
+  const lastAdhocReport = await previousReadings(env, {
+    kind,
+    maxAge: duration({ hours: 1 }),
+  });
+  const ageInSeconds = nowUnix - (lastAdhocReport?.ts || 0);
+  if (ageInSeconds > 1800 || !lastAdhocReport) {
     const results = await getSensorData(
-      SENSOR_IDS.split(",").shift() || "undefined"
+      env,
+      env.SENSOR_IDS.split(",").shift() || "undefined"
     );
-    await storeReadings(results);
-    await STATE.put("last_adhoc_report_refresh", `${nowUnix}`);
+    await storeReadings(env, { ...results, kind });
     return results;
   }
   console.log(
-    `ad-hoc report refreshed only ${secondsSince} second(s) ago, returning previous data`
+    `ad-hoc report refreshed only ${ageInSeconds} second(s) ago, returning previous data`
   );
-  return prevReadings;
+  return lastAdhocReport;
 }
 
-async function generateReport(): Promise<string> {
+async function generateReport(
+  env: Env,
+  kind: Exclude<OperationMode, "interval">
+): Promise<string> {
   logInfo("generateReport");
-  let results = await getAdhocReportReadings();
+  let results = await getAdhocReportReadings(env, kind);
   const timeString = DateTime.fromSeconds(results.ts)
-    .setZone(LOCAL_IANA_TIME_ZONE)
+    .setZone(env.LOCAL_IANA_TIME_ZONE)
     .toLocaleString(DateTime.DATETIME_FULL);
   let indicator = results.tenMinuteAvg > AQ_THRESHOLD ? "🔴" : "🟢";
   let forPlace = "";
@@ -61,8 +64,28 @@ async function generateReport(): Promise<string> {
   return message;
 }
 
-async function sendDailyReport(): Promise<void> {
-  const nowLocal = DateTime.now().setZone(LOCAL_IANA_TIME_ZONE);
+type DurationUnits = {
+  hours?: number;
+  minutes?: number;
+  seconds?: number;
+};
+
+function duration({ hours, minutes, seconds }: DurationUnits): number {
+  let result = 0;
+  if (hours) {
+    result += hours * 3600;
+  }
+  if (minutes) {
+    result += minutes * 60;
+  }
+  if (seconds) {
+    result += seconds;
+  }
+  return result;
+}
+
+async function sendDailyReport(env: Env): Promise<void> {
+  const nowLocal = DateTime.now().setZone(env.LOCAL_IANA_TIME_ZONE);
   if (!nowLocal.isValid) {
     throw new Error(
       `invalid timestamp, probably caused by bad time zone setting`
@@ -72,82 +95,186 @@ async function sendDailyReport(): Promise<void> {
   if (nowLocal.hour < 8) {
     return;
   }
-  const lastReportStr = await STATE.get<string>("last_successful_daily_report");
-  const lastReport = parseInt(lastReportStr ?? "0", 10);
-  if (lastReport + 82800 < nowUnix) {
-    const message = await generateReport();
+
+  const lastReport = await previousReadings(env, { kind: "daily" });
+  if ((lastReport?.ts ?? 0) + duration({ hours: 23 }) < nowUnix) {
+    const message = await generateReport(env, "daily");
     await publishPushoverMessage(
-      PUSHOVER_APPLICATION_TOKEN,
-      PUSHOVER_USER_TARGET,
+      env,
+      env.PUSHOVER_APPLICATION_TOKEN,
+      env.PUSHOVER_USER_TARGET,
       message
     );
-
-    await STATE.put("last_successful_daily_report", `${nowUnix}`);
   }
-}
-
-function currentTimestamp(): string {
-  return date("F j, Y, g:i a");
 }
 
 // @ts-ignore
 import indexhtml from "./index.html";
 
-const r = Router.create((handle) => {
-  handle("POST", `${PRIVATE_REPORT_URL}/refresh`, async () => {
-    return new Response("", {
-      status: 302,
-      headers: {
-        Location: PRIVATE_REPORT_URL,
-      },
-    });
+const r = Router.create<Env>((handle) => {
+  handle("GET", "/", async (request, env) => {
+    try {
+      const message = await generateReport(env, "adhoc");
+      return new Response(
+        (indexhtml as string).replaceAll("{{message}}", `${message}`),
+        {
+          headers: {
+            "content-type": "text/html",
+          },
+        }
+      );
+    } catch (e) {
+      return new Response(
+        `error: ${e}` + "\n" + ((e as any).stack || "<no stack>"),
+        {
+          status: 500,
+          headers: { "Content-Type": "text/plain" },
+        }
+      );
+    }
   });
-  handle("GET", PRIVATE_REPORT_URL, async (request) => {
-    const message = await generateReport();
-    return new Response(
-      (indexhtml as string).replaceAll("{{message}}", `${message}`),
-      {
-        headers: {
-          "content-type": "text/html",
-        },
-      }
-    );
-  });
 });
 
-addEventListener("fetch", (event) => {
-  event.respondWith(r.handle(event.request, {}, event));
-});
-
-addEventListener("scheduled", (event) => {
-  event.waitUntil(
-    Promise.all([sendDailyReport(), checkAirQuality()]).finally(() => {
-      return flushLogs();
-    })
-  );
-});
-
-function previousReadings(): Promise<SensorResults | null> {
-  return STATE.get<SensorResults>("last_readings", "json");
+async function removeOldReadings(env: Env): Promise<void> {
+  const nowEpoch = DateTime.utc().toUnixInteger();
+  const fourWeeksInSeconds = 2419200;
+  const minTs = nowEpoch - fourWeeksInSeconds;
+  await env.DB.prepare("DELETE FROM reading WHERE ts <= ?").bind(minTs).run();
 }
 
-function storeReadings(r: SensorResults): Promise<void> {
-  return STATE.put("last_readings", JSON.stringify(r), {
-    expirationTtl: 3600, // 1 hour
-  });
+export default {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext
+  ): Promise<Response> {
+    return r.handle(request, env, ctx);
+  },
+
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(
+      Promise.all([
+        sendDailyReport(env),
+        checkAirQuality(env),
+        removeOldReadings(env).catch((e) => {
+          console.error("failed to remove old readings", { error: `${e}` });
+        }),
+      ]).finally(() => {
+        return flushLogs();
+      })
+    );
+  },
+};
+
+const dbResultSchema = z.object({
+  ts: z.number(),
+  kind: operationModeSchema,
+  stale: z.union([z.literal(1), z.literal(0)]),
+  place_name: z.string().nullable(),
+  realtime: z.number(),
+  ten_minute_avg: z.number(),
+});
+
+type PreviousReadingsConditions = {
+  kind?: OperationMode;
+  maxAge?: number;
+};
+
+async function previousReadings(
+  env: Env,
+  cond: PreviousReadingsConditions
+): Promise<(SensorResults & { kind: OperationMode }) | null> {
+  const conditions = ["1 = 1"];
+  const params = [];
+  if (cond.kind) {
+    conditions.push("kind = ?");
+    params.push(cond.kind);
+  }
+  if (cond.maxAge) {
+    conditions.push("ts >= ?");
+    const nowUTC = DateTime.utc();
+    const minTimestamp = nowUTC.toUnixInteger() - cond.maxAge;
+    params.push(minTimestamp);
+  }
+
+  const query = `SELECT ts, kind, stale, place_name, realtime, ten_minute_avg FROM reading WHERE ${conditions.join(
+    " AND "
+  )} ORDER BY id DESC LIMIT 1`;
+  console.log({ query });
+  const stmt =
+    params.length > 0
+      ? env.DB.prepare(query).bind(...params)
+      : env.DB.prepare(query);
+  const result = await stmt.all();
+  if (!result.success) {
+    throw new Error(`d1_error: ${result.error}`);
+  }
+  const numResults = result.results?.length ?? 0;
+  let record: unknown;
+  switch (numResults) {
+    case 0:
+      return null;
+    case 1:
+      record = result.results![0];
+      break;
+    default:
+      throw new Error(
+        `unexpected number of results returned, expected 1 or 0, got ${numResults}`
+      );
+  }
+
+  const parsedRecord = dbResultSchema.safeParse(record);
+  if (!parsedRecord.success) {
+    throw new Error(`unexpected db result structure: ${parsedRecord.error}`);
+  }
+  return {
+    ts: parsedRecord.data.ts,
+    placeName: parsedRecord.data.place_name ?? undefined,
+    realtime: parsedRecord.data.realtime,
+    tenMinuteAvg: parsedRecord.data.ten_minute_avg,
+    kind: parsedRecord.data.kind,
+    stale: parsedRecord.data.stale === 1,
+  };
+}
+
+async function storeReadings(
+  env: Env,
+  r: SensorResults & { kind: OperationMode }
+): Promise<void> {
+  console.log("storing reading", { reading: r });
+  try {
+    const stmt = env.DB.prepare(
+      `INSERT INTO reading (ts, kind, stale, place_name, realtime, ten_minute_avg) VALUES (?, ?, ?, ?, ?, ?)`
+    ).bind(
+      r.ts,
+      r.kind,
+      r.stale ? 1 : 0,
+      r.placeName ?? null,
+      r.realtime,
+      r.tenMinuteAvg
+    );
+    await stmt.run();
+  } catch (e) {
+    console.error("failed to write reading", { error: `${e}` });
+    throw e;
+  }
 }
 
 const AQ_THRESHOLD = 65;
 
-async function checkAirQuality(): Promise<void> {
+async function checkAirQuality(env: Env): Promise<void> {
   try {
     logInfo("checkAirQuality");
     let results = await getSensorData(
-      SENSOR_IDS.split(",").shift() || "undefined"
+      env,
+      env.SENSOR_IDS.split(",").shift() || "undefined"
     );
     logInfo("current_readings", { ...results });
-    let lastReadings = await previousReadings();
-    await storeReadings(results);
+    let lastReadings = await previousReadings(env, {
+      kind: "interval",
+      maxAge: duration({ hours: 1 }),
+    });
+    await storeReadings(env, { ...results, kind: "interval" });
     if (!lastReadings) {
       logInfo("no previous readings stored, nothing to compare");
       return;
@@ -168,7 +295,7 @@ async function checkAirQuality(): Promise<void> {
       logInfo("nothing to alert about");
       return;
     }
-    await notify(event, results);
+    await notify(env, event, results);
   } catch (e: any) {
     logError("failed to check air quality", {
       error: e.message,
@@ -183,6 +310,7 @@ function roundToDecimal(x: number, precision: number): number {
 }
 
 async function notify(
+  env: Env,
   event: "air_quality_good" | "air_quality_bad",
   readings: SensorResults
 ): Promise<void> {
@@ -206,13 +334,15 @@ async function notify(
     message += "\n(⚠️ data might be stale)";
   }
   await publishPushoverMessage(
-    PUSHOVER_APPLICATION_TOKEN,
-    PUSHOVER_USER_TARGET,
+    env,
+    env.PUSHOVER_APPLICATION_TOKEN,
+    env.PUSHOVER_USER_TARGET,
     message
   );
 }
 
 async function publishPushoverMessage(
+  env: Env,
   applicationToken: string,
   to: string,
   message: string
@@ -229,7 +359,7 @@ async function publishPushoverMessage(
       user: to,
       message: message + "\n(Click this message to get a real-time report)",
       priority: -1,
-      url: `https://${HOSTNAME}${PRIVATE_REPORT_URL}`,
+      url: `https://${env.HOSTNAME}/`,
     }),
   });
 }

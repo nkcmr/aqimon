@@ -16,7 +16,6 @@ crons = ["*/30 * * * *"]
 [vars]
 SENSOR_IDS = "67381,62285" # comma delimited list of sensor ids
 HOSTNAME = "my.workers.dev.hostname"
-PRIVATE_REPORT_URL = "/some-url-that-is-hard-to-guess-to-preserve-your-purple-air-quota"
 PUSHOVER_APPLICATION_TOKEN = ""
 PUSHOVER_USER_TARGET = ""
 LOCAL_IANA_TIME_ZONE = "America/New_York"

@@ -1,8 +1,5 @@
 import { z } from "zod";
-
-declare const PURPLE_AIR_READ_API_KEY: string;
-declare const GOOGLE_MAPS_GEOCODING_API_KEY: string;
-declare const STATE: KVNamespace;
+import { Env } from "./env";
 
 const STALE_THRESHOLD = 1000 * 60 * 10;
 
@@ -26,12 +23,19 @@ export type SensorResults = {
   stale: boolean;
 };
 
-async function getPlaceName(lat: number, long: number): Promise<string> {
+async function getPlaceName(
+  env: Env,
+  lat: number,
+  long: number
+): Promise<string> {
   const stateKey = `placename:${lat},${long}`;
-  let placeNameResult = await STATE.get<{ result: string }>(stateKey, "json");
+  let placeNameResult = await env.STATE.get<{ result: string }>(
+    stateKey,
+    "json"
+  );
   if (!placeNameResult) {
     const response = await fetch(
-      `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${long}&key=${GOOGLE_MAPS_GEOCODING_API_KEY}`
+      `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${long}&key=${env.GOOGLE_MAPS_GEOCODING_API_KEY}`
     );
     if (!response.ok) {
       throw new Error(
@@ -55,19 +59,22 @@ async function getPlaceName(lat: number, long: number): Promise<string> {
     if (!placeNameResult) {
       throw new Error("failed to find suitable formatted address for lat,long");
     }
-    await STATE.put(stateKey, JSON.stringify(placeNameResult), {
+    await env.STATE.put(stateKey, JSON.stringify(placeNameResult), {
       expirationTtl: 31534272,
     });
   }
   return placeNameResult!.result;
 }
 
-export async function getSensorData(sensorID: string): Promise<SensorResults> {
+export async function getSensorData(
+  env: Env,
+  sensorID: string
+): Promise<SensorResults> {
   let response = await fetch(
     `https://api.purpleair.com/v1/sensors/${sensorID}`,
     {
       headers: {
-        "x-api-key": PURPLE_AIR_READ_API_KEY,
+        "x-api-key": env.PURPLE_AIR_READ_API_KEY,
       },
     }
   );
@@ -82,6 +89,7 @@ export async function getSensorData(sensorID: string): Promise<SensorResults> {
   let placeName: string | undefined;
   try {
     placeName = await getPlaceName(
+      env,
       result.sensor.latitude,
       result.sensor.longitude
     );
