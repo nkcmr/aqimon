@@ -1,7 +1,6 @@
 import { DateTime } from "luxon";
 import { z } from "zod";
 import { Env } from "./env";
-import { flushToString as flushLogs, logError, logInfo } from "./newRelic";
 import { SensorResults, getSensorData } from "./purpleAir";
 import { Router } from "./router";
 
@@ -42,7 +41,7 @@ async function generateReport(
   env: Env,
   kind: Exclude<OperationMode, "interval">
 ): Promise<string> {
-  logInfo("generateReport");
+  console.log("generateReport");
   let results = await getAdhocReportReadings(env, kind);
   const timeString = DateTime.fromSeconds(results.ts)
     .setZone(env.LOCAL_IANA_TIME_ZONE)
@@ -159,9 +158,7 @@ export default {
         removeOldReadings(env).catch((e) => {
           console.error("failed to remove old readings", { error: `${e}` });
         }),
-      ]).finally(() => {
-        return flushLogs();
-      })
+      ])
     );
   },
 };
@@ -264,22 +261,22 @@ const AQ_THRESHOLD = 65;
 
 async function checkAirQuality(env: Env): Promise<void> {
   try {
-    logInfo("checkAirQuality");
+    console.log("checkAirQuality");
     let results = await getSensorData(
       env,
       env.SENSOR_IDS.split(",").shift() || "undefined"
     );
-    logInfo("current_readings", { ...results });
+    console.log("current_readings", { ...results });
     let lastReadings = await previousReadings(env, {
       kind: "interval",
       maxAge: duration({ hours: 1 }),
     });
     await storeReadings(env, { ...results, kind: "interval" });
     if (!lastReadings) {
-      logInfo("no previous readings stored, nothing to compare");
+      console.log("no previous readings stored, nothing to compare");
       return;
     }
-    logInfo("last_readings", lastReadings);
+    console.log("last_readings", lastReadings);
     let event: "air_quality_good" | "air_quality_bad";
     if (
       lastReadings.tenMinuteAvg > AQ_THRESHOLD &&
@@ -292,12 +289,12 @@ async function checkAirQuality(env: Env): Promise<void> {
     ) {
       event = "air_quality_bad";
     } else {
-      logInfo("nothing to alert about");
+      console.log("nothing to alert about");
       return;
     }
     await notify(env, event, results);
   } catch (e: any) {
-    logError("failed to check air quality", {
+    console.log("failed to check air quality", {
       error: e.message,
     });
     throw e;
