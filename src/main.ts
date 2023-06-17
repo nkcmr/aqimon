@@ -12,10 +12,43 @@ const operationModeSchema = z.union([
 
 type OperationMode = z.infer<typeof operationModeSchema>;
 
+type SensorResultsWithStale = SensorResults & { stale: boolean };
+
+async function getNonStaleSensorData(
+  env: Env
+): Promise<SensorResultsWithStale> {
+  const STALE_THRESHOLD = duration({ minutes: 10 });
+  let first: SensorResults | undefined;
+  for (let sensorID of env.SENSOR_IDS.split(",")) {
+    const data = await getSensorData(env, sensorID);
+    const now = DateTime.now().toUnixInteger();
+    const dataAge = now - data.ts;
+    if (dataAge > STALE_THRESHOLD) {
+      console.log("sensor is reporting stale data", {
+        sensorID,
+        dataAge,
+        where: data.placeName,
+      });
+      if (!first) {
+        first = data;
+      }
+      continue;
+    }
+    return { ...data, stale: false };
+  }
+  if (!first) {
+    throw new Error("must be 0 sensor ids configured?");
+  }
+  console.log("all sensors are stale! returning first choice", {
+    where: first.placeName,
+  });
+  return { ...first, stale: true };
+}
+
 async function getAdhocReportReadings(
   env: Env,
   kind: "daily" | "adhoc"
-): Promise<SensorResults> {
+): Promise<SensorResultsWithStale> {
   const nowUTC = DateTime.utc();
   const nowUnix = nowUTC.toUnixInteger();
   const lastAdhocReport = await previousReadings(env, {
@@ -24,10 +57,7 @@ async function getAdhocReportReadings(
   });
   const ageInSeconds = nowUnix - (lastAdhocReport?.ts || 0);
   if (ageInSeconds > 1800 || !lastAdhocReport) {
-    const results = await getSensorData(
-      env,
-      env.SENSOR_IDS.split(",").shift() || "undefined"
-    );
+    const results = await getNonStaleSensorData(env);
     await storeReadings(env, { ...results, kind });
     return results;
   }
@@ -180,7 +210,7 @@ type PreviousReadingsConditions = {
 async function previousReadings(
   env: Env,
   cond: PreviousReadingsConditions
-): Promise<(SensorResults & { kind: OperationMode }) | null> {
+): Promise<(SensorResultsWithStale & { kind: OperationMode }) | null> {
   const conditions = ["1 = 1"];
   const params = [];
   if (cond.kind) {
@@ -236,7 +266,7 @@ async function previousReadings(
 
 async function storeReadings(
   env: Env,
-  r: SensorResults & { kind: OperationMode }
+  r: SensorResultsWithStale & { kind: OperationMode }
 ): Promise<void> {
   console.log("storing reading", { reading: r });
   try {
@@ -262,10 +292,7 @@ const AQ_THRESHOLD = 65;
 async function checkAirQuality(env: Env): Promise<void> {
   try {
     console.log("checkAirQuality");
-    let results = await getSensorData(
-      env,
-      env.SENSOR_IDS.split(",").shift() || "undefined"
-    );
+    let results = await getNonStaleSensorData(env);
     console.log("current_readings", { ...results });
     let lastReadings = await previousReadings(env, {
       kind: "interval",
@@ -309,7 +336,7 @@ function roundToDecimal(x: number, precision: number): number {
 async function notify(
   env: Env,
   event: "air_quality_good" | "air_quality_bad",
-  readings: SensorResults
+  readings: SensorResultsWithStale
 ): Promise<void> {
   let message = "";
   switch (event) {

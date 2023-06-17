@@ -1,8 +1,6 @@
 import { z } from "zod";
 import { Env } from "./env";
 
-const STALE_THRESHOLD = 1000 * 60 * 10;
-
 const purpleAirSensorResponseSchema = z.object({
   data_time_stamp: z.number(),
   sensor: z.object({
@@ -11,6 +9,7 @@ const purpleAirSensorResponseSchema = z.object({
     stats: z.object({
       "pm2.5": z.number(),
       "pm2.5_10minute": z.number(),
+      time_stamp: z.number(),
     }),
   }),
 });
@@ -20,7 +19,6 @@ export type SensorResults = {
   placeName: string | undefined;
   realtime: number;
   tenMinuteAvg: number;
-  stale: boolean;
 };
 
 async function getPlaceName(
@@ -94,12 +92,12 @@ export async function getSensorData(
       result.sensor.longitude
     );
   } catch {}
+  const ts = result.sensor.stats.time_stamp;
   return {
-    ts: result.data_time_stamp,
+    ts,
     placeName,
     realtime: aqiFromPM(result.sensor.stats["pm2.5"]),
     tenMinuteAvg: aqiFromPM(result.sensor.stats["pm2.5_10minute"]),
-    stale: Date.now() - result.data_time_stamp * 1000 > STALE_THRESHOLD,
   };
 }
 
